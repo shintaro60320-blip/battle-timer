@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#1b1b1b">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>ビブリオバトルタイマー</title>
+<style>
+/* レイアウト：画面全体が「今のフェーズの色」。上に見出し、中央に時間、下に操作。1画面で完結 */
+:root{
+  --bg:#fcfbf7;          /* 待機・プレゼン中の地（わずかに暖かい白） */
+  --fg:#1b1b1b;          /* 文字・数字 */
+  --muted:#6b6b66;       /* 補助文字 */
+  --warn:#d7262d;        /* ラスト1分の赤 */
+  --line:rgba(27,27,27,.18);
+  --font:"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic Medium","Noto Sans JP","Meiryo",sans-serif;
+  --num:"Helvetica Neue","Arial","Hiragino Sans","Noto Sans JP",sans-serif;
+  color-scheme:light;
+}
+html,body{height:100%;margin:0}
+body{
+  cursor:default;
+  background:var(--bg);color:var(--fg);font-family:var(--font);
+  display:flex;flex-direction:column;
+  padding:24px 24px calc(24px + env(safe-area-inset-bottom,0px));
+  box-sizing:border-box;gap:16px;
+  transition:background-color .35s cubic-bezier(.2,.7,.2,1);
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+}
+header{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:44px}
+h1{margin:0;font-size:clamp(16px,2.4vw,24px);font-weight:700;letter-spacing:.04em}
+h1 small{display:block;font-size:.62em;font-weight:500;letter-spacing:.12em;color:var(--muted);margin-bottom:2px}
+.test{background:none;border:1px solid var(--line);color:var(--fg);font:inherit;font-size:14px;
+  padding:8px 14px;border-radius:999px;cursor:pointer}
+.test:active{opacity:.6}
+main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;min-height:0}
+.phase{font-size:clamp(22px,4.5vw,44px);font-weight:700;letter-spacing:.06em;margin:0}
+.time{
+  font-family:var(--num);font-weight:800;line-height:1;margin:0;
+  font-size:min(28vw,42vh);letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
+  transition:color .25s cubic-bezier(.2,.7,.2,1);
+}
+.time.warn{color:var(--warn)}
+button:focus-visible{outline:3px solid var(--warn);outline-offset:3px}
+@media (max-width:480px){
+  body{padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px))}
+}
+@media (prefers-reduced-motion:reduce){body,.time{transition:none}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1><small>知的書評合戦</small>ビブリオバトル</h1>
+  <button class="test" id="btnTest" type="button">鐘テスト</button>
+</header>
+
+<main>
+  <p class="phase" id="phase">プレゼンタイム</p>
+  <p class="time" id="time">05:00</p>
+</main>
+
+
+<script>
+/* =====================================================================
+   設定はここだけ。段を足す・時間を変える・色を変える・鐘の回数を変える＝この中を書き換える
+   seconds   : その段の秒数
+   bg / fg   : 背景色 / 数字の色
+   warnAt    : 残り何秒以下で数字を warnFg にするか（0 なら色を変えん）
+   startBell : 段の開始時に鐘を鳴らす回数（0 なら鳴らさん）
+   endBell   : 段の終了時に鐘を鳴らす回数（0 なら鳴らさん）
+   autoNext  : true＝0 になったら人の操作なしで次の段へ／false＝0 で止まり、Enter で次へ
+   最後の段が終わったら、最初の段の表示（待機）に戻る。
+   ===================================================================== */
+const CONFIG = {
+  phases: [
+    { name: "プレゼンタイム",         seconds: 300, bg: "#fcfbf7", fg: "#1b1b1b", warnAt: 59, warnFg: "#d7262d", startBell: 1, endBell: 2, autoNext: true },
+    { name: "ディスカッションタイム", seconds: 120, bg: "#f2b705", fg: "#1b1b1b", warnAt: 0,  warnFg: "#d7262d", startBell: 0, endBell: 0, autoNext: true },
+  ],
+  bellGapSec: 0.9,   // 鐘を複数回鳴らす時の間隔（秒）
+};
+
+/* ---------- 鐘（音ファイル不要・その場で合成） ---------- */
+let ctx = null;
+function audioReady(){
+  if(!ctx){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return false;
+    ctx = new AC();
+  }
+  if(ctx.state === "suspended") ctx.resume();
+  return true;
+}
+function strike(at){
+  // 「チーン」：基音＋非整数倍音を指数減衰で。
+  const base = 1046.5;
+  const parts = [[1, 1.0, 2.6], [2.0, 0.45, 1.8], [2.76, 0.28, 1.3], [4.1, 0.14, 0.9], [5.4, 0.08, 0.6]];
+  const master = ctx.createGain(); master.gain.value = 0.5; master.connect(ctx.destination);
+  for(const [ratio, amp, dur] of parts){
+    const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = base * ratio;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(amp, at + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    o.connect(g); g.connect(master);
+    o.start(at); o.stop(at + dur + 0.05);
+  }
+}
+function ring(times){
+  if(!times || !audioReady()) return;
+  const t0 = ctx.currentTime + 0.02;
+  for(let i = 0; i < times; i++) strike(t0 + i * CONFIG.bellGapSec);
+}
+
+/* ---------- 画面を起こしたままにする（タブレットが途中で眠らんように） ---------- */
+let wakeLock = null;
+async function keepAwake(on){
+  try{
+    if(on && "wakeLock" in navigator && !wakeLock){
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    }else if(!on && wakeLock){ await wakeLock.release(); wakeLock = null; }
+  }catch(e){ /* 対応しとらん端末は黙って続ける */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible" && (S.status === "running")) keepAwake(true);
+});
+
+/* ---------- 時計（実時間基準・一時停止中は進まん） ---------- */
+const S = { status: "idle", phase: 0, endAt: 0, remainMs: 0 };  // idle | running | paused
+const $ = id => document.getElementById(id);
+const elTime = $("time"), elPhase = $("phase");
+
+function fmt(sec){
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+function paint(bg, fg){
+  document.documentElement.style.setProperty("--bg", bg);
+  document.documentElement.style.setProperty("--fg", fg);
+  document.body.style.backgroundColor = bg;
+}
+function render(){
+  const p = CONFIG.phases[S.phase];
+  paint(p.bg, p.fg);
+  elPhase.textContent = p.name;
+  let sec;
+  if(S.status === "idle") sec = p.seconds;
+  else if(S.status === "paused") sec = Math.ceil(S.remainMs / 1000);
+  else sec = Math.max(0, Math.ceil((S.endAt - Date.now()) / 1000));
+  elTime.textContent = fmt(sec);
+  elTime.classList.toggle("warn", S.status !== "idle" && p.warnAt > 0 && sec <= p.warnAt);
+  elTime.style.color = (S.status !== "idle" && p.warnAt > 0 && sec <= p.warnAt) ? p.warnFg : p.fg;
+}
+
+function startPhase(idx, baseTime){
+  const p = CONFIG.phases[idx];
+  S.phase = idx;
+  S.endAt = baseTime + p.seconds * 1000;   // 前の段の終了時刻を起点にすると、切替のズレが積もらん
+  S.status = "running";
+  ring(p.startBell);
+  render();
+}
+function endPhase(){
+  const p = CONFIG.phases[S.phase];
+  ring(p.endBell);
+  const next = S.phase + 1;
+  if(next < CONFIG.phases.length){
+    if(p.autoNext){ startPhase(next, S.endAt); }
+    else { S.phase = next; S.status = "idle"; render(); }
+  }else{
+    reset();   // 最後の段が終わったら 05:00 の待機表示へ戻る
+  }
+}
+function tick(){
+  if(S.status !== "running") return;
+  if(Date.now() >= S.endAt) endPhase(); else render();
+}
+setInterval(tick, 100);
+
+function mainAction(){
+  if(S.status === "idle"){
+    audioReady();
+    keepAwake(true);
+    startPhase(S.phase, Date.now());
+  }else if(S.status === "running"){
+    S.remainMs = Math.max(0, S.endAt - Date.now());
+    S.status = "paused"; render();
+  }else if(S.status === "paused"){
+    S.endAt = Date.now() + S.remainMs;
+    S.status = "running"; render();
+  }
+}
+function reset(){
+  S.status = "idle"; S.phase = 0; S.remainMs = 0;
+  keepAwake(false);
+  render();
+}
+
+$("btnTest").addEventListener("click", e => { e.stopPropagation(); ring(1); });
+document.addEventListener("keydown", e => {
+  if(e.repeat) return;
+  if(e.code === "Enter" || e.code === "NumpadEnter"){ e.preventDefault(); mainAction(); }
+  if(e.code === "Space"){ e.preventDefault(); reset(); }
+});
+document.body.addEventListener("click", e => {   // キーボードが無いタブレット用：画面タップ＝Enter と同じ
+  if(e.target.closest("button")) return;
+  mainAction();
+});
+render();
+</script>
+
+<script>
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  navigator.serviceWorker.register("./sw.js").catch(function () { /* 失敗してもタイマーは動く */ });
+}
+</script>
+</body>
+</html>

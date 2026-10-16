@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#1b1b1b">
+<link rel="manifest" href="countup.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>5分カウントアップ</title>
+<style>
+/* 数字だけ。上限（5分）で止まる。飾り・音なし */
+:root{
+  --bg:#fcfbf7;
+  --fg:#1b1b1b;
+  --muted:#8a8a84;
+  --font:"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic Medium","Noto Sans JP","Meiryo",sans-serif;
+  --num:"Helvetica Neue","Arial","Hiragino Sans","Noto Sans JP",sans-serif;
+  color-scheme:light;
+}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);font-family:var(--font);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:24px 24px calc(24px + env(safe-area-inset-bottom,0px));box-sizing:border-box;
+  cursor:default;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+}
+.time{
+  font-family:var(--num);font-weight:800;line-height:1;margin:0;
+  font-size:min(30vw,46vh);letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
+}
+</style>
+</head>
+<body>
+
+<p class="time" id="time">00:00</p>
+
+<script>
+/* 設定はここだけ */
+const CONFIG = {
+  limitSeconds: 300,   // ここまで数えたら止まる（5分）
+};
+
+const S = { status: "idle", startAt: 0, elapsedMs: 0 };  // idle | running | stopped
+const elTime = document.getElementById("time");
+
+function fmt(sec){
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+function elapsed(){
+  return S.status === "running" ? S.elapsedMs + (Date.now() - S.startAt) : S.elapsedMs;
+}
+function render(){
+  const sec = Math.min(CONFIG.limitSeconds, Math.floor(elapsed() / 1000));
+  elTime.textContent = fmt(sec);
+}
+function tick(){
+  if(S.status !== "running") return;
+  if(elapsed() >= CONFIG.limitSeconds * 1000){
+    S.elapsedMs = CONFIG.limitSeconds * 1000; S.status = "stopped";   // 上限で止まる
+  }
+  render();
+}
+setInterval(tick, 100);
+
+function toggle(){
+  if(S.status === "running"){
+    S.elapsedMs = elapsed(); S.status = "stopped";
+  }else{
+    if(S.elapsedMs >= CONFIG.limitSeconds * 1000) return;   // 上限に達した後は R で戻してから
+    S.startAt = Date.now(); S.status = "running";
+    keepAwake(true);
+  }
+  render();
+}
+function reset(){
+  S.status = "idle"; S.elapsedMs = 0; S.startAt = 0;
+  keepAwake(false);
+  render();
+}
+
+/* 画面が途中で眠らんように（対応端末のみ・URLで開いた時に効く） */
+let wakeLock = null;
+async function keepAwake(on){
+  try{
+    if(on && "wakeLock" in navigator && !wakeLock){
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    }else if(!on && wakeLock){ await wakeLock.release(); wakeLock = null; }
+  }catch(e){}
+}
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible" && S.status === "running") keepAwake(true);
+});
+
+document.addEventListener("keydown", e => {
+  if(e.repeat) return;
+  if(e.code === "Enter" || e.code === "NumpadEnter"){ e.preventDefault(); toggle(); }
+  if(e.key === "r" || e.key === "R"){ e.preventDefault(); reset(); }
+});
+document.body.addEventListener("click", toggle);   // キーボードが無い端末用：タップ＝Enter
+render();
+</script>
+
+<script>
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  navigator.serviceWorker.register("./sw.js").catch(function () { /* 失敗してもタイマーは動く */ });
+}
+</script>
+</body>
+</html>
